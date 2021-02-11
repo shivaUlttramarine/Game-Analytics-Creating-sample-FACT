@@ -13,16 +13,16 @@ In next steps, I try to ask questions and get ready to do some analysis on the f
 
 here are how we create the LUX-USER-FACT:
 
-#A) creating below data sets, with granularity of, User_id, level, Week:
+# A) creating below data sets, with granularity of, User_id, level, Week:
 1. starting-gem dataset
 2. defeat-cnt dataset
 3. extra-move-purchase dataset
 4. booster-purchase-cnt dataset (in defeat and win situation)
 5. evergy-purchased-cnt dataset
 
-#B) joining them all
+# B) joining them all
 
-#C) adding some metrics based on existing Fields like:
+# C) adding some metrics based on existing Fields like:
     last_energy_cnt 
     enrgey_purchased flag 
     lux_start time
@@ -40,4 +40,4 @@ here are how we create the LUX-USER-FACT:
 
 
 
-D) Asking some Questions to ask from this Data to gain insight
+# D) Asking some Questions to ask from this Data to gain insight
