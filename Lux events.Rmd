@@ -1,0 +1,556 @@
+
+#*************************************************************************
+#*************************************************************************
+## First Steps
+## 1. Adding required Libraries
+## 2. Connecting to DB
+## 3. Fetching target table including GA events
+#*************************************************************************
+#*************************************************************************
+
+```{r}
+if(!"RMariaDB" %in% (.packages())){require(RMariaDB)}
+install.packages("RMariaDB")
+install.packages("doParallel")
+install.packages("dplyr")
+install.packages("zoo")
+install.packages("ggplot2")
+install.packages("tidyverse")
+
+
+library(dplyr)
+library(ggplot2)
+library(RMariaDB)
+library(jsonlite)
+library(parallel)
+library(foreach)
+library(doParallel)
+library(gridExtra)
+library(tidyverse)  # get da whole shabeng!
+#Connecting to MySQL DB
+garageDB <- dbConnect(MariaDB()
+                      , user = "user"
+                      , password = "pass"
+                      , dbname = "Dbname"
+                      , host = "host",Port     = 3306)
+
+#List tables in DB
+dbListTables(garageDB)
+
+
+# query <- "SELECT id,game_analytic_id,user_id,value,amount,amount_usd,DATE_FORMAT(FROM_UNIXTIME(`client_ts`), '%Y-%m-%d %H:%i:%s') as Date ,category,event_id from garajDb.data_final where DATE_FORMAT(FROM_UNIXTIME(`client_ts`), '%Y-%m-%d %H:%i:%s') > '2020-11-15' and category <> 'error' "
+
+query<- "select id,game_analytic_id,user_id,value,amount,amount_usd,DATE_FORMAT(FROM_UNIXTIME(`client_ts`), '%Y-%m-%d %H:%i:%s') as Date ,category,event_id  from garajDb.Move_3mnth event_id not like 'Match3:Defeat:NumberOfInGameBoosterUsed:Ma%'    and event_id not like 'Match3:Win:NumberOfInGameBoosterUsed:Ma%'"
+```
+
+
+
+
+
+#*************************************************************************
+As you know, Events are seperate by ':' charachter.
+They all are located in "event_id"  field.
+
+as very first step, I am trying to seperate this String into 5 distinct fields to ease later calculations: 
+#*************************************************************************
+
+```{r}
+results <- dbSendQuery(garageDB, query)
+df <- dbFetch(results)
+dbClearResult(results)
+# df<-2
+df$lv1 <- unlist(mclapply(1:nrow(df),FUN = function(x){  strsplit(df$event_id[x] , ":")[[1]][1] } ,mc.cores = 20))
+df$lv2 <- unlist(mclapply(1:nrow(df),FUN = function(x){  strsplit(df$event_id[x] , ":")[[1]][2] } ,mc.cores = 20))
+df$lv3 <- unlist(mclapply(1:nrow(df),FUN = function(x){  strsplit(df$event_id[x] , ":")[[1]][3] } ,mc.cores = 20))
+df$lv4 <- unlist(mclapply(1:nrow(df),FUN = function(x){  strsplit(df$event_id[x] , ":")[[1]][4] } ,mc.cores = 20))
+df$lv5 <- unlist(mclapply(1:nrow(df),FUN = function(x){  strsplit(df$event_id[x] , ":")[[1]][5] } ,mc.cores = 20))
+
+
+options("scipen"=100, "digits"=4)
+
+
+
+
+head(df)
+
+```
+
+
+```{r}
+colnames(gem_start)
+```
+
+
+
+
+
+
+
+#*************************************************************************
+This event is activatd weekly on Thursdays
+So I need to add a manipulated Week based "datetime" field, which starts on Thursday.
+#*************************************************************************
+```{r}
+
+data.frame(day = 10:30,
+week =unlist(lapply(10:30, function(x){format(as.POSIXct(paste0("2020-12-",x," 11:01:00 GMT")), "%U")}))
+)
+
+
+data.frame(day = 10:30,
+week =unlist(lapply(10:30, function(x){format(as.Date(paste0("2020-12-",x," 11:01:00")) +3, "%U")}))
+)
+
+
+data.frame(day = p$datetime,
+week =unlist(lapply(p$datetime, function(x){format(as.Date(x) +3, "%U")}))
+)
+
+p<- gem_start[(gem_start$user_id =="01b1e42a-6985-4314-8c93-580d4ec27646" & startsWith(gem_start$lv4, "Se")) ,c("datetime","lv4","week")]
+p[order(p$datetime),]
+
+
+
+```
+
+
+
+
+
+#*************************************************************************
+Here I take all logs of an Event, to show "starting Gems" which which user start Lux-levels
+
+also I extract the followings:
+serie_number: there are 10 Lux levels. I can extrcat it directly from "EVENT_ID"
+#*************************************************************************
+```{r}
+gem_start <- df[startsWith(df$event_id , "Match3:FirstStart:Gem:"),]
+
+
+gem_start$serie_number <-as.integer(substr(gem_start$lv4,21,22))
+gem_start$datetime <- as.POSIXct(gem_start$Date, "%Y-%m-%d %H:%M:%S" ,tz = "GMT")
+gem_start$week <- as.integer(strftime(gem_start$datetime,format="%Y"))*100+(as.integer(format(as.Date(gem_start$datetime)+3, "%U")) ) %%52 
+gem_start$datetime
+
+
+gem_start$datetime
+# gem_start[,c("datetime","week")]
+```
+
+
+
+
+
+
+
+
+
+
+
+
+#*************************************************************************
+user can go to normal levels and then comes back to Lux.
+here I try to detect how many times did he leave the Lux by identifying last level played.
+It canbe eauther another "lux" level (gamer never leaves the series) or "normal" (gamer jumped out)
+I do itusing lag function
+#*************************************************************************
+
+```{r}
+##### last level
+s1<-gem_start %>%
+group_by(user_id) %>%
+mutate(last_level= lag(lv4, order_by=Date)
+       )
+```
+
+
+
+
+#*************************************************************************
+An aggregation showing starting and finishing GEMs for each User, on each level, on each week
+```{r}
+s2<- s1 %>%
+  filter(str_detect(lv4, "^Ser")) %>%
+  group_by(user_id) %>%
+  mutate(gem_start = as.integer(value ),
+       gem_finish= as.integer(lead(value, order_by=Date) ),
+       start_time = datetime,
+       finish_time = lead(datetime, order_by=Date)
+  ) %>%
+  mutate(gem_spend = ifelse( gem_start >gem_finish  , gem_finish -  gem_start,0 ) ,
+       gem_recieved = ifelse( gem_start <gem_finish  ,  gem_start - gem_finish,0 ) ,   
+       level_dur_min =  as.numeric(difftime(as.POSIXct(finish_time),as.POSIXct(start_time) ,units = "mins" )),
+       level_dur_hour = as.numeric( difftime(as.POSIXct(finish_time),as.POSIXct(start_time) ,units = "hours" ))
+  )
+
+
+base <- s2 %>% select("user_id","value","lv4", "week", "last_level","gem_start","gem_finish","start_time","finish_time", "Date","gem_spend", "level_dur_min", "level_dur_hour") %>%
+  arrange(user_id,Date)
+
+
+base$serie_number <-as.integer(substr(base$lv4,21,22))
+base
+```
+
+
+
+
+
+
+
+
+
+
+
+#*************************************************************************
+###################  Energy purchased
+filtering GA logs belong to energy purchased Event on Lux levels
+aggregation  showing  energy-puchased-cnt, for each user,on each level, on each week
+#*************************************************************************
+```{r}
+
+
+user_energy <- df[startsWith(df$event_id , "Match3:Win:Energy:S"),]
+user_energy$serie_number <-as.integer(substr(user_energy$lv4,21,22))
+user_energy$datetime <- as.POSIXct(user_energy$Date, "%Y-%m-%d %H:%M:%S" ,tz = "GMT")
+user_energy$week <- as.integer(strftime(user_energy$datetime,format="%Y"))*100+(as.integer(format(as.Date(user_energy$datetime)+3, "%U")) ) %%52 
+
+user_energy
+
+user_energy_cnt <- user_energy %>% group_by(user_id,serie_number,week) %>%
+  summarise(
+      energy_cnt = n()
+    ) 
+
+user_energy_cnt
+nrow(user_energy_cnt)  #16608
+sum(user_energy_cnt$energy_purchased_cnt)  #27892
+
+
+```
+
+
+<!-- ################# move left -->
+<!-- ```{r} -->
+
+
+<!-- user_energy <- df[startsWith(df$event_id , "Match3:Win:Energy:S"),] -->
+<!-- user_energy$serie_number <-as.integer(substr(user_energy$lv4,21,22)) -->
+<!-- user_energy$datetime <- as.POSIXct(user_energy$Date, "%Y-%m-%d %H:%M:%S" ,tz = "GMT") -->
+<!-- user_energy$week <- as.integer(strftime(user_energy$datetime,format="%Y"))*100+(as.integer(format(as.Date(user_energy$datetime)+3, "%U")) ) %%52  -->
+
+<!-- user_energy -->
+
+<!-- user_energy_cnt <- user_energy %>% group_by(user_id,serie_number,week) %>% -->
+<!--   summarise( -->
+<!--       energy_cnt = n() -->
+<!--     )  -->
+
+<!-- user_energy_cnt -->
+<!-- nrow(user_energy_cnt)  #16608 -->
+<!-- sum(user_energy_cnt$energy_purchased_cnt)  #27892 -->
+
+
+<!-- ``` -->
+
+
+#*************************************************************************
+################# Booster purchased (defeat)
+filtering GA logs belong to Booster purchased Event on Lux levels, where user is defeated
+aggregation  showing  booster-puchased-cnt, for each user,on each level, on each week
+#*************************************************************************
+```{r}
+lux_boost_purchased_d <- df[startsWith(df$event_id , "Match3:Defeat:NumberOfInGameBoosterUsed:S"),]
+lux_boost_purchased_d$serie_number <-as.integer(substr(lux_boost_purchased_d$lv4,21,22))
+lux_boost_purchased_d$datetime <- as.POSIXct(lux_boost_purchased_d$Date, "%Y-%m-%d %H:%M:%S" ,tz = "GMT")
+lux_boost_purchased_d$week <- as.integer(strftime(lux_boost_purchased_d$datetime,format="%Y"))*100+(as.integer(format(as.Date(lux_boost_purchased_d$datetime)+3, "%U")) ) %%52 
+
+lux_boost_purchased_d
+
+user_boost_defeat_pch_cnt <- lux_boost_purchased_d %>% group_by(user_id,serie_number,week) %>%
+  summarise(boost_defeat_purchased_cnt = n(),boost_defeat_purchased_sum=sum( as.integer(value)))
+
+
+
+
+user_boost_defeat_pch_cnt
+length(unique(user_boost_defeat_pch_cnt$user_id))    #5964
+nrow(user_boost_defeat_pch_cnt)  #23400
+sum(user_boost_defeat_pch_cnt$boost_purchased_cnt)  #36187
+sum(user_boost_defeat_pch_cnt$boost_purchased_sum)    #551
+
+
+
+```
+
+
+
+
+
+#*************************************************************************
+################# Booster purchased (win)
+filtering GA logs belong to Booster purchased Event on Lux levels, where user is won
+aggregation  showing  booster-puchased-cnt, for each user,on each level, on each week
+#*************************************************************************
+```{r}
+lux_boost_purchased_w <- df[startsWith(df$event_id , "Match3:Win:NumberOfInGameBoosterUsed:S"),]
+lux_boost_purchased_w$serie_number <-as.integer(substr(lux_boost_purchased_w$lv4,21,22))
+lux_boost_purchased_w$datetime <- as.POSIXct(lux_boost_purchased_w$Date, "%Y-%m-%d %H:%M:%S" ,tz = "GMT")
+lux_boost_purchased_w$week <- as.integer(strftime(lux_boost_purchased_w$datetime,format="%Y"))*100+(as.integer(format(as.Date(lux_boost_purchased_w$datetime)+3, "%U")) ) %%52 
+
+lux_boost_purchased_w
+
+user_boost_win_pch_cnt <- lux_boost_purchased_w %>% group_by(user_id,serie_number,week) %>%
+  summarise(boost_win_purchased_cnt = n(),boost_win_purchased_sum=sum( as.integer(value)))
+
+
+
+
+user_boost_win_pch_cnt
+length(unique(user_boost_win_pch_cnt$user_id))    #5964
+nrow(user_boost_win_pch_cnt)  #23400
+sum(user_boost_win_pch_cnt$boost_purchased_cnt)  #36187
+sum(user_boost_win_pch_cnt$boost_purchased_sum)    #551
+
+
+
+```
+
+
+
+
+#*************************************************************************
+################# move purchased
+
+filtering GA logs belong to extra Move purchased Event on Lux levels
+aggregation  showing  Extra-move-puchased-cnt, for each user,on each level, on each week
+#*************************************************************************
+```{r}
+lux_mv_purchased <- df[startsWith(df$event_id , "Match3:MovePurchased:Se"),]
+lux_mv_purchased$serie_number <-as.integer(substr(lux_mv_purchased$lv3,21,22))
+lux_mv_purchased$datetime <- as.POSIXct(lux_mv_purchased$Date, "%Y-%m-%d %H:%M:%S" ,tz = "GMT")
+lux_mv_purchased$week <- as.integer(strftime(lux_mv_purchased$datetime,format="%Y"))*100+(as.integer(format(as.Date(lux_mv_purchased$datetime)+3, "%U")) ) %%52 
+
+
+
+user_mv_pch_cnt <- lux_mv_purchased %>% group_by(user_id,serie_number,week) %>%
+  summarise(mv_purchased_cnt = n())
+
+
+
+
+user_mv_pch_cnt
+nrow(user_mv_pch_cnt)  #5073
+sum(user_mv_pch_cnt$mv_purchased_cnt)  #9846
+
+
+```
+
+
+
+
+
+
+#*************************************************************************
+###################  Defeat
+target: retry cnt on each level. How many time did a user retried a LUX-level?
+filtering GA logs belong to defeat  Event on Lux levels.
+aggregation  showing  defeat-cnt, for each user,on each level, on each week
+#*************************************************************************
+```{r}
+
+df[startsWith(df$event_id , "Match3:Defeat:S"),]
+
+user_defeat <- df[startsWith(df$event_id , "Match3:Defeat:S"),]
+user_defeat$serie_number <-as.integer(substr(user_defeat$lv3,21,22))
+user_defeat$datetime <- as.POSIXct(user_defeat$Date, "%Y-%m-%d %H:%M:%S" ,tz = "GMT")
+user_defeat$week <- as.integer(strftime(user_defeat$datetime,format="%Y"))*100+(as.integer(format(as.Date(user_defeat$datetime)+3, "%U")) ) %%52 
+
+user_defeat_cnt <- user_defeat %>% group_by(user_id,week,serie_number) %>%
+  mutate(start_time = datetime,finish_time = lead(datetime, order_by=Date)) %>%
+summarise( 
+    defeat_cnt = n() 
+) %>%
+  mutate(   
+       defeat_dur_min =  as.numeric(difftime(as.POSIXct(finish_time),as.POSIXct(start_time) ,units = "mins" )),
+       defeat_dur_hour = as.numeric( difftime(as.POSIXct(finish_time),as.POSIXct(start_time) ,units = "hours" ))
+  )
+
+user_defeat_cnt
+
+
+```
+
+
+```{r}
+
+p<-user_defeat[(user_defeat$user_id =="01b1e42a-6985-4314-8c93-580d4ec27646" ) ,c("datetime","lv3","week")]
+p[order(p$datetime),]
+
+p<-user_defeat_cnt[(user_defeat_cnt$user_id =="01b1e42a-6985-4314-8c93-580d4ec27646" ), ]
+# p[order(p$datetime),]
+p
+# gem_start$
+```
+
+
+
+
+
+
+
+
+
+
+
+
+################## Creating the 360-degree Lux-Fact***********************
+#*************************************************************************
+#*************************************************************************
+##    joining all the above dataframes
+##    Granularity: USER , Level, week
+##    adding some metrics to enhace later analysis based on existing fields:
+##    last_energy_cnt 
+##    enrgey_purchased flag 
+##    lux_start time
+##    lux_finish time
+##    max_level_reached on lux levels
+##    lux_gem_start
+##    lux_gem_finish
+##    avg_lv_dur_min: avg duration time of each Luxury level for each level
+##    median_lv_dur_min
+##    last_lv_dur_min: duration of very last level that user played in Lux series. (showing how hard the last level was, which made some gamers quite)
+##    tot_defeat_cnt
+##    last_defeat_cnt:  how many times did the gamer lose on last level? (showing how hard the last level of gamed n that serie was)
+##    moreto come...
+#*************************************************************************
+#*************************************************************************
+
+```{r}
+
+j1<- base %>% 
+  left_join( user_defeat_cnt, c("user_id" = "user_id", "serie_number" ="serie_number","week"="week")) %>%
+  left_join( user_mv_pch_cnt, c("user_id" = "user_id", "serie_number" ="serie_number","week"="week")) %>%
+  left_join( user_boost_defeat_pch_cnt, c("user_id" = "user_id", "serie_number" ="serie_number","week"="week")) %>%
+  left_join( user_boost_win_pch_cnt, c("user_id" = "user_id", "serie_number" ="serie_number","week"="week")) %>%
+  left_join( user_energy_cnt, c("user_id" = "user_id", "serie_number" ="serie_number","week"="week"))
+
+j1
+  
+
+
+j1$jump_out<-  apply(j1 , MARGIN = 1 , FUN = function(x){ifelse(startsWith(x[5],"Match3"),as.integer(x[14]),NA)}  )
+
+j2 <- j1 %>% group_by(user_id) %>% mutate(last_energy_cnt = lag(energy_cnt,order_by = Date))
+
+j3 <-j2 %>% mutate(enrgey_purchased = ifelse( (last_energy_cnt - energy_cnt >0) & jump_out ==0 ,(last_energy_cnt - energy_cnt) ,0 ))
+
+j3
+# j4 <- 
+  j3[,c("user_id" ,"serie_number","week","energy_cnt","last_energy_cnt" , "enrgey_purchased")]
+
+```
+
+```{r}
+
+j4 <- j3 %>%   mutate(lux_gem_start = ifelse(serie_number ==1 , as.integer(value),0))
+
+j5 <- j4 %>% group_by(user_id,week) %>% mutate(reverese_rnk = row_number(-serie_number)) %>%
+  mutate(lux_gem_finish = ifelse(reverese_rnk ==1 , as.integer(value),0))
+j5[,c("user_id","week","serie_number","level_dur_min","level_dur_hour","lux_gem_start","reverese_rnk","lux_gem_finish","defeat_cnt","defeat_dur_min","defeat_dur_hour")]
+
+
+j5
+fact <- j5 %>% group_by(user_id,week) %>%
+  summarise( lux_start  = min(Date),
+             lux_finish = max(Date),
+             max_level_reached   = max(serie_number),
+             lux_gem_start       = max(lux_gem_start),
+             lux_gem_finish      = max(lux_gem_finish),
+             avg_lv_dur_min      = mean(level_dur_min),
+             median_lv_dur_min   = median(level_dur_min),
+             last_lv_dur_min     = max(ifelse(reverese_rnk==1 , level_dur_min ,0 )),
+             tot_defeat_cnt      = sum(defeat_cnt,na.rm = TRUE),
+             last_defeat_cnt     = max(ifelse(reverese_rnk==1 , defeat_cnt ,0 ))
+             ) 
+  mutate(lux_gem_balance = lux_gem_finish - lux_gem_start)
+
+j5
+fact
+
+#### why tot_defeat_cnt is more than 3???? 
+```
+
+
+
+
+
+#*************************************************************************
+#*************************************************************************
+#***  
+#***  Asking some questions from the fact
+#***
+#***  attraction: do they finish the game? where do they stop by? 
+#***  does spending more money ends up in not leaving the level? or that makepoeple stay on the game?
+#***  
+#***  do people leave bcz it's so easy? or hard? does that help retention to  make levels harder?
+#***  
+#***  
+#***  do they leave after reaching the prise?
+#***  
+#***  do they buy more in LUX?
+#***  do they stay more in LUX?
+#***  do they retry more in LUX?
+#***  
+#***  do they jump out usually?  if yes that meansit is not attractive enough
+#***  do they jump to get GEM?
+#***  
+#***  why dothey leav? 
+#***  1. ENERGY?   then dothey come back when energy is full?
+#***  2. retry threshold?
+#***  3. boring?  (leave onvery first levels)
+#***  4. they reach the firt prise?
+#***  5. normal game is more interesting?  (they jump  a lot)
+#***  
+#***  Segmenting
+#***  
+#***  Does starting Gem effect who much they go in?
+#***  
+#***  
+#***  is it beneficial  for the? is the ending GEM more than Starting GEM?
+#***  
+#*************************************************************************
+#*************************************************************************
+
+
+
+
+
+
+
+
+
+
+############################################### more to come
+
+
+######## LEVEL 360-degree FACT ( LEVEL UNDERSTANDING)
+```{r}
+user_startgem_lst_lv %>%
+  group_by(user_id,week) %>%
+  summarise()
+
+
+```
+
+
+
+####### #USER UNDERSTAND
+
+```{r}
+
+```
+
+
+
+####### LEVEL DIFUCULTY IN NORMAL GAMES
